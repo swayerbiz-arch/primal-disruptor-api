@@ -127,8 +127,10 @@ IMPORTANT:
     }
 
     const data = JSON.parse(rawText);
+    console.log("Claude's full response:", JSON.stringify(data, null, 2));  // <-- ADDED
 
     const output = (data?.content?.[0]?.text || "").toLowerCase().trim();
+    console.log("Claude's raw output:", output);  // <-- ADDED
 
     const valid = [
       "circadian",
@@ -141,6 +143,7 @@ IMPORTANT:
     ];
 
     const disruptor = valid.find((d) => output.includes(d)) || "circadian";
+    console.log("Final disruptor chosen:", disruptor);  // <-- ADDED
 
     return res.status(200).json({
       ok: true,
