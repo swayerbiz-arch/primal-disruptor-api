@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   try {
@@ -28,15 +28,26 @@ export default async function handler(req, res) {
       routineAudio,
       fullName,
       phone,
+      debug, // <-- send {debug:true} to receive debug payload
     } = body;
 
     if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(500).json({ error: "Missing ANTHROPIC_API_KEY in Vercel env vars" });
+      return res.status(500).json({ ok: false, error: "Missing ANTHROPIC_API_KEY in Vercel env vars" });
     }
+
+    // --- DEBUG: prove what we received ---
+    const received = {
+      hasFoodAudio: typeof foodAudio === "string" && foodAudio.length > 0,
+      hasRoutineAudio: typeof routineAudio === "string" && routineAudio.length > 0,
+      foodAudioPrefix: typeof foodAudio === "string" ? foodAudio.slice(0, 30) : null,
+      routineAudioPrefix: typeof routineAudio === "string" ? routineAudio.slice(0, 30) : null,
+      foodAudioLength: typeof foodAudio === "string" ? foodAudio.length : 0,
+      routineAudioLength: typeof routineAudio === "string" ? routineAudio.length : 0,
+    };
 
     const content = [];
 
-    // UPDATED PROMPT - PRIORITIZES VOICE RECORDINGS
+    // Keep prompt simple but explicit about audio priority
     content.push({
       type: "text",
       text: `You are analyzing a testosterone assessment to determine the user's PRIMARY testosterone disruptor.
@@ -50,12 +61,11 @@ digitaloverstimulation
 gutdysbiosis
 microplastic
 
-ANALYSIS PRIORITY ORDER:
-1. FIRST - Analyze the voice recordings (food & routine) - these contain the MOST IMPORTANT data
-2. SECOND - Use quiz answers only to support or clarify what you heard in the audio
-3. If audio reveals clear patterns (bad diet, processed foods, low protein, microwave use, etc.) - PRIORITIZE THOSE OVER quiz answers
+PRIORITY:
+- If audio exists, prioritize what you HEAR in FOOD/ROUTINE over the quiz.
+- Do NOT default to circadian or chronicstressresponse unless audio supports it.
 
-QUIZ ANSWERS (secondary context):
+QUIZ:
 - Energy (1-10): ${energy ?? ""}
 - Sleep hours: ${sleepHours ?? ""}
 - Bedtime: ${bedtime ?? ""}
@@ -65,90 +75,45 @@ QUIZ ANSWERS (secondary context):
 - Digestive issues: ${digestive ?? ""}
 - Body composition: ${bodyComp ?? ""}
 
-VOICE RECORDING GUIDELINES (PRIMARY):
-The user will describe their FOOD and DAILY ROUTINE in audio recordings below.
-
-Listen for these HIGH-PRIORITY signals:
-
-NUTRITIONAL DEFICIENCY signals (prioritize if heard):
-- McDonald's, fast food, takeout mentioned frequently
-- Low protein intake (less than 3 meals with protein)
-- No mention of vegetables, fruits, or whole foods
-- Skipping meals or eating once per day
-- High processed food intake (frozen meals, packaged snacks)
-- No mention of healthy fats (eggs, meat, fish, nuts)
-- Very low calorie intake or restrictive eating
-
-MICROPLASTIC signals (prioritize if heard):
-- Microwaving food in plastic containers
-- Drinking from plastic water bottles daily
-- Eating mostly packaged/wrapped foods
-- Using plastic tupperware for hot food
-- Frequent mention of "plastic" or "containers"
-
-GUT DYSBIOSIS signals (prioritize if heard):
-- Bloating, gas, constipation, diarrhea mentioned
-- Eating very late at night (within 2 hours of bed)
-- High sugar intake
-- Alcohol consumption mentioned
-- Antibiotic use or recent illness
-
-SEDENTARY METABOLISM signals (prioritize if heard):
-- Sitting all day, no movement mentioned
-- Desk job with no exercise
-- No resistance training or gym
-- Less than 5,000 steps daily
-
-DIGITAL OVERSTIMULATION signals (prioritize if heard):
-- Phone use mentioned excessively
-- Scrolling before bed
-- Gaming for hours
-- Screen time dominating routine
-
-CIRCADIAN signals (only if audio confirms):
-- Irregular sleep schedule described in detail
-- Night shift work WITH poor sleep quality
-- Staying up past 2am regularly WITH daytime fatigue
-
-CHRONIC STRESS signals (only if audio confirms):
-- High-pressure job WITH burnout symptoms
-- Multiple life stressors mentioned explicitly
-- Anxiety/panic attacks mentioned
-
-IMPORTANT DECISION RULES:
-- If food recording mentions McDonald's 3x/day or similar = nutritionaldeficiency (override other signals)
-- If routine mentions plastic everywhere = microplastic (override other signals)
-- If digestive issues are mentioned in audio = gutdysbiosis (strong signal)
-- Do NOT default to circadian or stress unless audio explicitly supports it
-- Quiz answers showing "high stress" or "late bedtime" should NOT override clear audio evidence of nutrition/plastic/gut issues
-
-Output ONLY the category word (no punctuation, no extra text).`,
+Audio will appear next if provided.
+Output ONLY the category word.`,
     });
 
     // Helper: attach base64 audio if present
-    const pushAudio = (dataUrl, label) => {
-      if (!dataUrl || typeof dataUrl !== "string") return;
-      if (!dataUrl.startsWith("data:audio")) return;
+    const audioAttach = { foodAttached: false, routineAttached: false, foodMime: null, routineMime: null };
+
+    const pushAudio = (dataUrl, label, which) => {
+      if (!dataUrl || typeof dataUrl !== "string") return false;
+      if (!dataUrl.startsWith("data:audio")) return false;
 
       const matches = dataUrl.match(/^data:(audio\/[^;]+);base64,(.+)$/);
-      if (!matches) return;
+      if (!matches) return false;
+
+      const mime = matches[1]; // e.g. audio/webm
+      const base64 = matches[2];
+
+      // Claude wants format like "webm" not "audio/webm"
+      const format = mime.split("/")[1] || "webm";
 
       content.push({
         type: "input_audio",
-        input_audio: {
-          data: matches[2],
-          format: "webm",
-        },
+        input_audio: { data: base64, format },
       });
+      content.push({ type: "text", text: `[Above is the ${label}]` });
 
-      content.push({
-        type: "text",
-        text: `[Above is the ${label} - ANALYZE THIS CAREFULLY FOR PRIMARY DISRUPTOR]`,
-      });
+      if (which === "food") {
+        audioAttach.foodAttached = true;
+        audioAttach.foodMime = mime;
+      } else if (which === "routine") {
+        audioAttach.routineAttached = true;
+        audioAttach.routineMime = mime;
+      }
+
+      return true;
     };
 
-    pushAudio(foodAudio, "FOOD RECORDING (what they eat daily)");
-    pushAudio(routineAudio, "ROUTINE RECORDING (their typical day)");
+    pushAudio(foodAudio, "FOOD RECORDING (what they eat)", "food");
+    pushAudio(routineAudio, "ROUTINE RECORDING (their typical day)", "routine");
 
     const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -160,6 +125,7 @@ Output ONLY the category word (no punctuation, no extra text).`,
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 30,
+        temperature: 0,
         messages: [{ role: "user", content }],
       }),
     });
@@ -167,18 +133,28 @@ Output ONLY the category word (no punctuation, no extra text).`,
     const rawText = await anthropicResp.text();
 
     if (!anthropicResp.ok) {
+      // Return the REAL reason in the response (no logs needed)
       return res.status(500).json({
+        ok: false,
         error: "Claude API error",
         status: anthropicResp.status,
         details: rawText,
+        received,
+        audioAttach,
       });
     }
 
     const data = JSON.parse(rawText);
-    console.log("Claude's full response:", JSON.stringify(data, null, 2));
 
-    const output = (data?.content?.[0]?.text || "").toLowerCase().trim();
-    console.log("Claude's raw output:", output);
+    // Some responses may have multiple content blocks; combine all text blocks
+    const allText = Array.isArray(data?.content)
+      ? data.content
+          .filter((c) => c && c.type === "text" && typeof c.text === "string")
+          .map((c) => c.text)
+          .join("\n")
+      : "";
+
+    const output = (allText || "").toLowerCase().trim();
 
     const valid = [
       "circadian",
@@ -191,7 +167,19 @@ Output ONLY the category word (no punctuation, no extra text).`,
     ];
 
     const disruptor = valid.find((d) => output.includes(d)) || "circadian";
-    console.log("Final disruptor chosen:", disruptor);
+
+    // If debug=true, return proof of what happened
+    if (debug === true) {
+      return res.status(200).json({
+        ok: true,
+        disruptor,
+        debug: {
+          received,
+          audioAttach,
+          claudeText: allText,
+        },
+      });
+    }
 
     return res.status(200).json({
       ok: true,
@@ -201,6 +189,7 @@ Output ONLY the category word (no punctuation, no extra text).`,
     });
   } catch (err) {
     return res.status(500).json({
+      ok: false,
       error: "Server crashed",
       details: String(err?.message || err),
     });
